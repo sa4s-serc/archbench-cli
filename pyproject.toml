@@ -55,6 +55,12 @@ inference-local = [
     "transformers>=4.30.0",
     "torch>=2.0.0",
 ]
+# For architecture view generation (diagram) image similarity metrics
+diagram = [
+    "opencv-python>=4.5.0",
+    "scikit-image>=0.19.0",
+    "image-similarity-measures>=0.3.5",
+]
 # For HuggingFace datasets
 datasets = [
     "datasets>=2.0.0",
@@ -67,7 +73,7 @@ dev = [
 ]
 # Full installation with everything
 all = [
-    "archbench[eval,bertscore,inference,inference-local,datasets,dev]",
+    "archbench[eval,bertscore,inference,inference-local,diagram,datasets,dev]",
 ]
 
 [project.scripts]

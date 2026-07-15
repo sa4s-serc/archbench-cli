@@ -108,6 +108,9 @@ def run_evaluation(
     elif task == "traceability":
         from archbench.tasks.traceability import dataset as trace_dataset
         dataset = trace_dataset.load_dataset(dataset_path=dataset_path, task_type="sad-code")
+    elif task == "diagram":
+        from archbench.tasks.diagram import dataset as diagram_dataset
+        dataset = diagram_dataset.load_dataset(dataset_path=dataset_path, instance_ids=instance_ids)
     else:
         # TODO: Add other task loaders
         dataset = load_dataset(task, dataset_path=dataset_path, instance_ids=instance_ids)
@@ -157,6 +160,19 @@ def run_evaluation(
     elif task == "traceability":
         # Batch processing for traceability
         instance_results = evaluate_traceability_batch(
+            dataset=dataset,
+            predictions=predictions,
+        )
+        for result in instance_results:
+            if result["status"] == EvalStatus.SUCCESS.value:
+                completed_ids.append(result[KEY_INSTANCE_ID])
+            elif result["status"] == EvalStatus.MISSING_PREDICTION.value:
+                missing_ids.append(result[KEY_INSTANCE_ID])
+            else:
+                error_ids.append(result[KEY_INSTANCE_ID])
+    elif task == "diagram":
+        # Batch processing for diagram (image similarity)
+        instance_results = evaluate_diagram_batch(
             dataset=dataset,
             predictions=predictions,
         )
@@ -420,12 +436,84 @@ def evaluate_traceability_batch(
     return results
 
 
+def evaluate_diagram_batch(
+    dataset: List[Dict],
+    predictions: Dict[str, Dict],
+) -> List[Dict]:
+    """
+    Evaluate the architecture view generation task in batch mode.
+
+    Each prediction is expected to carry a ``generated_image`` path (produced
+    during inference by rendering the PlantUML code). The generated image is
+    compared against the instance's ground truth image via image similarity
+    metrics.
+    """
+    from archbench.constants import KEY_GROUND_TRUTH_IMAGE, KEY_GENERATED_IMAGE
+    from archbench.tasks.diagram import grading as diagram_grading
+
+    results = []
+    valid_indices = []
+    valid_gen_paths = []
+    valid_gt_paths = []
+
+    for instance in dataset:
+        instance_id = instance[KEY_INSTANCE_ID]
+
+        if instance_id not in predictions:
+            results.append({
+                KEY_INSTANCE_ID: instance_id,
+                "status": EvalStatus.MISSING_PREDICTION.value,
+                "metrics": {},
+            })
+            continue
+
+        pred = predictions[instance_id]
+        generated_image = pred.get(KEY_GENERATED_IMAGE, "")
+        ground_truth_image = instance.get(KEY_GROUND_TRUTH_IMAGE, "")
+
+        if not generated_image or not ground_truth_image:
+            results.append({
+                KEY_INSTANCE_ID: instance_id,
+                "status": EvalStatus.INVALID_FORMAT.value,
+                "metrics": {},
+            })
+            continue
+
+        valid_indices.append(len(results))
+        valid_gen_paths.append(generated_image)
+        valid_gt_paths.append(ground_truth_image)
+        results.append({
+            KEY_INSTANCE_ID: instance_id,
+            "status": EvalStatus.SUCCESS.value,
+            "model": pred.get(KEY_MODEL, "unknown"),
+            "metrics": {},  # Will be filled in
+        })
+
+    # Compute metrics in batch
+    if valid_gen_paths:
+        logger.info(f"Computing image metrics for {len(valid_gen_paths)} valid predictions...")
+        batch_metrics = diagram_grading.compute_diagram_metrics_batch(
+            generated_image_paths=valid_gen_paths,
+            ground_truth_image_paths=valid_gt_paths,
+        )
+        for i, idx in enumerate(valid_indices):
+            results[idx]["metrics"] = {
+                metric: values[i]
+                for metric, values in batch_metrics.items()
+            }
+
+    return results
+
+
 def get_reference_for_task(task: str, instance: Dict) -> Any:
     """Get the reference/ground truth for a task instance."""
     if task == "adr":
         return instance.get(KEY_DECISION, "")
     elif task == "traceability":
         return instance.get("trace_links", [])
+    elif task == "diagram":
+        from archbench.constants import KEY_GROUND_TRUTH_IMAGE
+        return instance.get(KEY_GROUND_TRUTH_IMAGE, "")
     elif task == "serverless":
         return instance.get("reference_function", "")
     elif task == "dynamic":

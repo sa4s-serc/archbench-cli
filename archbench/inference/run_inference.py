@@ -355,9 +355,67 @@ def extract_response(task: str, response: str) -> Any:
     elif task == "traceability":
         from archbench.tasks.traceability import dataset as trace_dataset
         return trace_dataset.extract_prediction(response, task_type="sad-code")
+    elif task == "diagram":
+        from archbench.tasks.diagram import dataset as diagram_dataset
+        return diagram_dataset.extract_prediction(response)
     else:
         # TODO: Add other task extraction
         return response
+
+
+def render_plantuml(puml_code: str, instance_id: str, output_dir: Path) -> Optional[str]:
+    """
+    Render PlantUML code to a diagram image using the local ``plantuml`` binary.
+
+    Args:
+        puml_code: The PlantUML source to render
+        instance_id: Used to name the generated image and .puml file
+        output_dir: Directory to write the rendered image into
+
+    Returns:
+        Path to the generated image, or None if rendering failed (e.g. plantuml
+        not installed or the code did not compile).
+    """
+    import glob
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not puml_code.strip():
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    puml_dir = output_dir / "plantuml_code"
+    puml_dir.mkdir(parents=True, exist_ok=True)
+    puml_file = puml_dir / f"{instance_id}.puml"
+    puml_file.write_text(puml_code, encoding="utf-8")
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                ["plantuml", "-o", temp_dir, str(puml_file)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                logger.warning(f"PlantUML rendering failed for {instance_id}: {result.stderr.strip()}")
+                return None
+
+            generated_files = glob.glob(os.path.join(temp_dir, "*"))
+            if not generated_files:
+                logger.warning(f"PlantUML produced no output for {instance_id}")
+                return None
+
+            generated_file = generated_files[0]
+            ext = os.path.splitext(generated_file)[1]
+            output_path = output_dir / f"{instance_id}{ext}"
+            shutil.move(generated_file, str(output_path))
+            return str(output_path)
+    except FileNotFoundError:
+        logger.warning("plantuml binary not found; skipping render. Install PlantUML to enable image evaluation.")
+        return None
+    except Exception as e:
+        logger.warning(f"PlantUML rendering error for {instance_id}: {e}")
+        return None
 
 
 # =============================================================================
@@ -408,6 +466,16 @@ def run_inference_single(
                 sentences=instance["sentences"],
                 task_type="sad-code",
                 code_files=instance.get("available_targets", []),  # Provide actual code files!
+                prompt_style=prompt_style,
+            )
+        elif task == "diagram":
+            from archbench.tasks.diagram import prompts as diagram_prompts
+            from archbench.constants import KEY_SUMMARY, KEY_CONCERN, KEY_BEHAVIOR
+            messages = diagram_prompts.create_chat_messages(
+                summary=instance[KEY_SUMMARY],
+                concern=instance.get(KEY_CONCERN, "general"),
+                behavior=instance.get(KEY_BEHAVIOR, "static"),
+                repo_name=instance_id,
                 prompt_style=prompt_style,
             )
         else:
@@ -520,6 +588,9 @@ def run_inference(
     elif task == "traceability":
         from archbench.tasks.traceability import dataset as trace_dataset
         dataset = trace_dataset.load_dataset(dataset_path=dataset_path, task_type="sad-code")
+    elif task == "diagram":
+        from archbench.tasks.diagram import dataset as diagram_dataset
+        dataset = diagram_dataset.load_dataset(dataset_path=dataset_path, instance_ids=instance_ids)
     else:
         # TODO: Add other task loaders
         dataset = load_dataset(task, dataset_path=dataset_path, instance_ids=instance_ids)
@@ -600,6 +671,17 @@ def run_inference(
                 "latency_ms": trajectory.latency_ms,
                 "token_usage": trajectory.token_usage,
             }
+
+            # For diagram, render the generated PlantUML to an image for evaluation
+            if task == "diagram" and trajectory.success and trajectory.final_prediction:
+                from archbench.constants import KEY_GENERATED_IMAGE
+                image_path = render_plantuml(
+                    puml_code=str(trajectory.final_prediction),
+                    instance_id=instance_id,
+                    output_dir=output_path / "generated_images",
+                )
+                prediction[KEY_GENERATED_IMAGE] = image_path or ""
+
             predictions.append(prediction)
 
             # Write immediately (for resume capability)

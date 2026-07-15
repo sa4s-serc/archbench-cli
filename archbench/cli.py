@@ -30,6 +30,7 @@ Examples:
 Available tasks:
   adr           - Architecture Decision Record generation
   traceability  - Architecture traceability link recovery
+  diagram       - Architecture view generation (PlantUML diagrams)
   serverless    - Serverless component generation
   dynamic       - Dynamic IoT service generation
 

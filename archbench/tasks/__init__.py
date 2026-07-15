@@ -8,6 +8,6 @@ Each task has its own module with:
 """
 
 from archbench.constants import TASKS, TaskType
-from archbench.tasks import adr, traceability
+from archbench.tasks import adr, traceability, diagram
 
-__all__ = ["TASKS", "TaskType", "adr", "traceability"]
+__all__ = ["TASKS", "TaskType", "adr", "traceability", "diagram"]

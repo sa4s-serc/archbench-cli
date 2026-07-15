@@ -230,6 +230,228 @@ JUDGE_PROMPT_BUILDERS = {
 
 
 # =============================================================================
+# Diagram Judge (vision-based, 3 C's rubric)
+# =============================================================================
+
+# The three-criteria rubric, ported from the CodeToDiagram evaluation
+DIAGRAM_RATINGS = {
+    "Meets Expectations": 1.0,
+    "Partially Meets Expectations": 0.5,
+    "Does Not Meet Expectations": 0.0,
+}
+
+DIAGRAM_JUDGE_PROMPT = """**Objective:** Evaluate the quality of the generated architecture diagram by comparing it with the ground truth diagram.
+**Instructions:**
+1. The first attached image is the ground truth image, and the second attached image is the generated image.
+2. Evaluate the generated diagram according to the criteria below.
+3. For each criterion, select one rating:
+    - **Meets Expectations**: No significant issues.
+    - **Partially Meets Expectations**: Minor issues or small improvements needed.
+    - **Does Not Meet Expectations**: Major issues or incorrect/missing elements.
+4. Provide a brief justification for each rating, focusing on specific observations from the diagrams.
+**Evaluation Criteria:**
+1. **Clarity**: The generated diagram should be understandable to both technical and non-technical stakeholders.
+        - Assess whether the symbols, icons, labels, information, components, connectors are clear and unambiguous.
+        - Make sure each component has a clear and descriptive name that reflects its purpose or function.
+        - Verify that components are arranged in a logical and readable layout.
+2. **Consistency:** Check whether symbols, icons, styles, and notations, connectors, components are used uniformly throughout the diagram.
+        - Assess whether the generated diagram is structurally and semantically aligned with the ground truth diagram.
+3. **Completeness:** Evaluate whether the diagram includes all the necessary information from the ground truth.
+        - Identify any missing, extra, or incorrect elements or connections.
+
+Output Format:
+Return a JSON object in the exact structure below, filling in the rating (Meets Expectations, Partially Meets Expectations, or Does Not Meet Expectations) and justification for each criterion.
+```json
+{
+  "Clarity": {
+    "rating": "",
+    "justification": ""
+  },
+  "Completeness": {
+    "rating": "",
+    "justification": ""
+  },
+  "Consistency": {
+    "rating": "",
+    "justification": ""
+  }
+}
+```
+"""
+
+
+def _load_image_as_base64(image_path: str) -> str:
+    import base64
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode("utf-8")
+
+
+def build_diagram_judge_messages(
+    ground_truth_image: str,
+    generated_image: str,
+) -> List[Dict[str, Any]]:
+    """
+    Build a vision prompt comparing a ground truth and generated diagram image.
+    Uses the OpenAI chat image_url content format.
+    """
+    gt_b64 = _load_image_as_base64(ground_truth_image)
+    gen_b64 = _load_image_as_base64(generated_image)
+
+    return [
+        {"role": "system", "content": "You are a software architecture expert."},
+        {"role": "user", "content": [
+            {"type": "text", "text": DIAGRAM_JUDGE_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{gt_b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{gen_b64}"}},
+        ]},
+    ]
+
+
+def parse_diagram_judge_response(response: str) -> Optional[Dict[str, Dict[str, str]]]:
+    """Parse the 3 C's JSON response, handling markdown fences and prose."""
+    text = response.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+    logger.warning(f"Could not parse diagram judge response: {text[:200]}")
+    return None
+
+
+def run_diagram_judge(
+    predictions_path: str,
+    dataset_path: str,
+    judge_model: str = "gpt-4o",
+    output_dir: str = "results",
+    sample_count: int = DEFAULT_SAMPLE_COUNT,
+    run_id: Optional[str] = None,
+    temperature: float = 0.3,
+    ollama_host: str = "http://localhost:11434",
+) -> Dict[str, Any]:
+    """
+    Run the vision-based 3 C's judge for the architecture view generation task.
+
+    For a sample of instances, each generated diagram is compared against its
+    ground truth image on Clarity, Completeness, and Consistency. The per-criterion
+    ratings are aggregated into the standard judge report schema.
+    """
+    from archbench.constants import KEY_GROUND_TRUTH_IMAGE, KEY_GENERATED_IMAGE
+    from archbench.inference.run_inference import get_provider
+    from archbench.tasks.diagram import dataset as diagram_dataset
+
+    start_time = time.time()
+    if run_id is None:
+        run_id = f"judge_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Load ground truth images and predictions
+    dataset = diagram_dataset.load_dataset(dataset_path=dataset_path)
+    dataset_dict = {d[KEY_INSTANCE_ID]: d for d in dataset}
+    predictions = load_predictions(predictions_path)
+    logger.info(f"Loaded {len(predictions)} predictions")
+
+    # Instances that have both a ground truth image and a generated image
+    judgeable_ids = [
+        iid for iid in dataset_dict
+        if dataset_dict[iid].get(KEY_GROUND_TRUTH_IMAGE)
+        and iid in predictions and predictions[iid].get(KEY_GENERATED_IMAGE)
+    ]
+
+    random.seed(42)
+    actual_sample = min(sample_count, len(judgeable_ids))
+    sampled_ids = (
+        random.sample(judgeable_ids, actual_sample)
+        if actual_sample < len(judgeable_ids)
+        else judgeable_ids
+    )
+    logger.info(f"Judging {len(sampled_ids)} instances with {judge_model}...")
+
+    provider = get_provider(judge_model, ollama_host=ollama_host)
+
+    # Per-criterion rating tallies and cited examples
+    criteria = ["Clarity", "Completeness", "Consistency"]
+    rating_scores = {c: [] for c in criteria}
+    per_instance = []
+
+    for iid in sampled_ids:
+        gt_image = dataset_dict[iid][KEY_GROUND_TRUTH_IMAGE]
+        gen_image = predictions[iid][KEY_GENERATED_IMAGE]
+        try:
+            messages = build_diagram_judge_messages(gt_image, gen_image)
+            response_text, _ = provider.generate(
+                messages=messages, max_tokens=1024, temperature=temperature,
+            )
+            parsed = parse_diagram_judge_response(response_text)
+        except Exception as e:
+            logger.warning(f"Diagram judge failed for {iid}: {e}")
+            parsed = None
+
+        if not parsed:
+            continue
+
+        entry = {KEY_INSTANCE_ID: iid}
+        for c in criteria:
+            rating = parsed.get(c, {}).get("rating", "")
+            if rating in DIAGRAM_RATINGS:
+                rating_scores[c].append(DIAGRAM_RATINGS[rating])
+                entry[c] = rating
+        per_instance.append(entry)
+
+    # Aggregate: mean per criterion, overall score on a 1-5 scale
+    criterion_means = {
+        c: (sum(v) / len(v) if v else 0.0) for c, v in rating_scores.items()
+    }
+    overall_fraction = (
+        sum(criterion_means.values()) / len(criteria) if per_instance else 0.0
+    )
+    overall_score = round(1 + overall_fraction * 4)  # map [0,1] -> [1,5]
+
+    elapsed = time.time() - start_time
+    judge_report = {
+        "run_id": run_id,
+        "task": "diagram",
+        "judge_model": judge_model,
+        "timestamp": datetime.now().isoformat(),
+        "elapsed_time_seconds": elapsed,
+        "predictions_path": predictions_path,
+        "instances_sampled": len(per_instance),
+        "instances_total": len(judgeable_ids),
+        "score": overall_score,
+        "criterion_means": criterion_means,
+        "per_instance_ratings": per_instance,
+    }
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    report_file = output_path / f"{run_id}_diagram_judge_report.json"
+    save_report(judge_report, str(report_file))
+
+    print_diagram_judge_summary(judge_report)
+    return judge_report
+
+
+def print_diagram_judge_summary(report: Dict) -> None:
+    """Print the diagram judge summary to console."""
+    print("\n" + "=" * 60)
+    print("LLM JUDGE ASSESSMENT - diagram (3 C's)")
+    print("=" * 60)
+    print(f"Judge model: {report['judge_model']}")
+    print(f"Instances judged: {report['instances_sampled']} / {report['instances_total']}")
+    print("-" * 60)
+    print("Criterion means (0.0 = does not meet, 1.0 = meets):")
+    for c, mean in report["criterion_means"].items():
+        print(f"  {c}: {mean:.3f}")
+    print("-" * 60)
+    print(f"Overall score: {report['score']} / 5")
+    print(f"Elapsed time: {report['elapsed_time_seconds']:.1f}s")
+    print("=" * 60 + "\n")
+
+
+# =============================================================================
 # Response Parsing
 # =============================================================================
 
@@ -310,6 +532,19 @@ def run_llm_judge(
 
     if run_id is None:
         run_id = f"judge_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Diagram uses a vision-based per-instance 3 C's judge (separate code path)
+    if task == "diagram":
+        return run_diagram_judge(
+            predictions_path=predictions_path,
+            dataset_path=dataset_path,
+            judge_model=judge_model,
+            output_dir=output_dir,
+            sample_count=sample_count,
+            run_id=run_id,
+            temperature=temperature,
+            ollama_host=ollama_host,
+        )
 
     if task not in JUDGE_PROMPT_BUILDERS:
         raise ValueError(
