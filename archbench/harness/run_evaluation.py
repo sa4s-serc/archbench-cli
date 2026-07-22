@@ -110,7 +110,11 @@ def run_evaluation(
         dataset = trace_dataset.load_dataset(dataset_path=dataset_path, task_type="sad-code")
     elif task == "diagram":
         from archbench.tasks.diagram import dataset as diagram_dataset
-        dataset = diagram_dataset.load_dataset(dataset_path=dataset_path, instance_ids=instance_ids)
+        dataset = diagram_dataset.load_dataset(
+            dataset_path=dataset_path,
+            instance_ids=instance_ids,
+            predictions_path=predictions_path,
+        )
     else:
         # TODO: Add other task loaders
         dataset = load_dataset(task, dataset_path=dataset_path, instance_ids=instance_ids)
@@ -446,7 +450,8 @@ def evaluate_diagram_batch(
     Each prediction is expected to carry a ``generated_image`` path (produced
     during inference by rendering the PlantUML code). The generated image is
     compared against the instance's ground truth image via image similarity
-    metrics.
+    metrics, falling back to the ``ground_truth_image`` recorded on the
+    prediction when the dataset instance does not carry one.
     """
     from archbench.constants import KEY_GROUND_TRUTH_IMAGE, KEY_GENERATED_IMAGE
     from archbench.tasks.diagram import grading as diagram_grading
@@ -469,7 +474,9 @@ def evaluate_diagram_batch(
 
         pred = predictions[instance_id]
         generated_image = pred.get(KEY_GENERATED_IMAGE, "")
-        ground_truth_image = instance.get(KEY_GROUND_TRUTH_IMAGE, "")
+        ground_truth_image = (
+            instance.get(KEY_GROUND_TRUTH_IMAGE) or pred.get(KEY_GROUND_TRUTH_IMAGE) or ""
+        )
 
         if not generated_image or not ground_truth_image:
             results.append({

@@ -122,6 +122,37 @@ def load_from_image_dir(ground_truth_dir: str) -> List[DiagramInstance]:
     return instances
 
 
+def load_from_predictions(predictions_path: str) -> List[DiagramInstance]:
+    """
+    Build diagram instances from a predictions file that already carries the
+    ground truth image path per prediction.
+
+    Inference records ``ground_truth_image`` alongside ``generated_image`` when a
+    ground truth directory is supplied, which lets evaluation and the judge run
+    straight off the predictions without re-reading the image directory.
+    """
+    instances = []
+    with open(predictions_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            pred = json.loads(line)
+            ground_truth_image = pred.get(KEY_GROUND_TRUTH_IMAGE)
+            if not ground_truth_image:
+                continue
+            instances.append({
+                KEY_INSTANCE_ID: pred[KEY_INSTANCE_ID],
+                KEY_SUMMARY: "",
+                KEY_CONCERN: "",
+                KEY_BEHAVIOR: "",
+                COL_REPO_URL: "",
+                KEY_GROUND_TRUTH_IMAGE: ground_truth_image,
+            })
+
+    logger.info(f"Loaded {len(instances)} ground truth references from {predictions_path}")
+    return instances
+
+
 def resolve_ground_truth_images(
     instances: List[DiagramInstance],
     ground_truth_dir: str,
@@ -157,21 +188,35 @@ def load_dataset(
     dataset_path: Optional[str] = None,
     instance_ids: Optional[List[str]] = None,
     ground_truth_dir: Optional[str] = None,
+    predictions_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Load the architecture view generation dataset.
 
     Args:
-        dataset_path: Path to a JSONL/CSV file of repository summaries
+        dataset_path: Path to a JSONL/CSV file of repository summaries, or a
+            directory of ground truth images
         instance_ids: Optional filter for specific instances
         ground_truth_dir: Directory of ground truth diagram images (matched by stem)
+        predictions_path: Predictions file to recover ground truth references from
+            when no dataset_path is given
 
     Returns:
         List of dataset instances
     """
+    # Fall back to the ground truth paths recorded in the predictions themselves,
+    # so evaluation can follow inference without pointing at the image directory again.
+    if dataset_path is None and predictions_path:
+        dataset = load_from_predictions(predictions_path)
+        if instance_ids:
+            instance_id_set = set(instance_ids)
+            dataset = [d for d in dataset if d[KEY_INSTANCE_ID] in instance_id_set]
+        return dataset
+
     if dataset_path is None:
         raise ValueError(
-            "Please provide a dataset_path (JSONL or CSV of repository summaries)."
+            "Please provide a dataset_path (JSONL or CSV of repository summaries, "
+            "or a directory of ground truth images)."
         )
 
     path = Path(dataset_path)

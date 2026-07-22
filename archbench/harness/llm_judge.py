@@ -323,9 +323,28 @@ def parse_diagram_judge_response(response: str) -> Optional[Dict[str, Dict[str, 
     return None
 
 
+def judge_api_key_available(judge_model: str) -> bool:
+    """
+    Check whether the API key required by the judge model is set.
+
+    Used to keep the judge optional: it runs only when a key is available and is
+    skipped otherwise. Local models served through Ollama need no key.
+    """
+    import os
+
+    model_lower = judge_model.lower()
+    if model_lower.startswith("ollama/"):
+        return True
+    if any(x in model_lower for x in ["gpt-4", "gpt-3.5", "davinci", "text-"]):
+        return bool(os.getenv("OPENAI_API_KEY"))
+    if "claude" in model_lower:
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
+    return False
+
+
 def run_diagram_judge(
     predictions_path: str,
-    dataset_path: str,
+    dataset_path: Optional[str] = None,
     judge_model: str = "gpt-4o",
     output_dir: str = "results",
     sample_count: int = DEFAULT_SAMPLE_COUNT,
@@ -339,6 +358,9 @@ def run_diagram_judge(
     For a sample of instances, each generated diagram is compared against its
     ground truth image on Clarity, Completeness, and Consistency. The per-criterion
     ratings are aggregated into the standard judge report schema.
+
+    When no dataset_path is given, the ground truth images recorded on the
+    predictions during inference are used.
     """
     from archbench.constants import KEY_GROUND_TRUTH_IMAGE, KEY_GENERATED_IMAGE
     from archbench.inference.run_inference import get_provider
@@ -349,7 +371,10 @@ def run_diagram_judge(
         run_id = f"judge_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # Load ground truth images and predictions
-    dataset = diagram_dataset.load_dataset(dataset_path=dataset_path)
+    dataset = diagram_dataset.load_dataset(
+        dataset_path=dataset_path,
+        predictions_path=predictions_path,
+    )
     dataset_dict = {d[KEY_INSTANCE_ID]: d for d in dataset}
     predictions = load_predictions(predictions_path)
     logger.info(f"Loaded {len(predictions)} predictions")

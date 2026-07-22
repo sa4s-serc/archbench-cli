@@ -552,6 +552,7 @@ def run_inference(
     resume_from: Optional[str] = None,
     limit: Optional[int] = None,
     ollama_host: str = "http://localhost:11434",
+    ground_truth_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run inference on an entire dataset.
@@ -568,6 +569,9 @@ def run_inference(
         instance_ids: Optional list of specific instance IDs to process
         resume_from: Path to existing predictions file to resume from
         limit: Optional limit on number of instances to process (for testing)
+        ground_truth_dir: Directory of ground truth diagram images (diagram task).
+            When given, each prediction records its ground truth image so that
+            evaluation and the judge can run without re-specifying the directory.
 
     Returns:
         Dictionary with summary statistics
@@ -590,7 +594,11 @@ def run_inference(
         dataset = trace_dataset.load_dataset(dataset_path=dataset_path, task_type="sad-code")
     elif task == "diagram":
         from archbench.tasks.diagram import dataset as diagram_dataset
-        dataset = diagram_dataset.load_dataset(dataset_path=dataset_path, instance_ids=instance_ids)
+        dataset = diagram_dataset.load_dataset(
+            dataset_path=dataset_path,
+            instance_ids=instance_ids,
+            ground_truth_dir=ground_truth_dir,
+        )
     else:
         # TODO: Add other task loaders
         dataset = load_dataset(task, dataset_path=dataset_path, instance_ids=instance_ids)
@@ -673,14 +681,17 @@ def run_inference(
             }
 
             # For diagram, render the generated PlantUML to an image for evaluation
-            if task == "diagram" and trajectory.success and trajectory.final_prediction:
-                from archbench.constants import KEY_GENERATED_IMAGE
-                image_path = render_plantuml(
-                    puml_code=str(trajectory.final_prediction),
-                    instance_id=instance_id,
-                    output_dir=output_path / "generated_images",
-                )
-                prediction[KEY_GENERATED_IMAGE] = image_path or ""
+            # and carry the ground truth reference through to the prediction record
+            if task == "diagram":
+                from archbench.constants import KEY_GENERATED_IMAGE, KEY_GROUND_TRUTH_IMAGE
+                if trajectory.success and trajectory.final_prediction:
+                    image_path = render_plantuml(
+                        puml_code=str(trajectory.final_prediction),
+                        instance_id=instance_id,
+                        output_dir=output_path / "generated_images",
+                    )
+                    prediction[KEY_GENERATED_IMAGE] = image_path or ""
+                prediction[KEY_GROUND_TRUTH_IMAGE] = instance.get(KEY_GROUND_TRUTH_IMAGE) or ""
 
             predictions.append(prediction)
 

@@ -179,26 +179,36 @@ The diagram task needs image dependencies and the `plantuml` binary:
 
 ```bash
 pip install -e ".[diagram]"   # opencv, scikit-image, image-similarity-measures
+```
 
-# Generate diagrams from repository summaries (renders PlantUML to images)
+Generation, evaluation and the judge run as a single command. Diagrams are
+rendered from the generated PlantUML, compared against the ground truth images
+(matched by file stem), and judged on the 3 C's. The judge is optional and only
+runs when an API key for the judge model is available:
+
+```bash
 archbench inference \
     --task diagram \
     --model claude-3-5-sonnet-20240620 \
     --dataset_path generated_summaries.jsonl \
-    --output_dir results/
+    --ground_truth_dir ground_truth_views/ \
+    --output_dir results/ \
+    --evaluate \
+    --judge
+```
 
-# Evaluate generated images against ground truth images (matched by file stem)
+Each prediction records both the generated and the ground truth image, so the
+steps can also be run separately against an existing predictions file:
+
+```bash
 archbench evaluate \
     --task diagram \
     --predictions_path results/<run>/predictions.jsonl \
-    --dataset_path ground_truth_views/ \
     --output_dir results/
 
-# LLM-as-a-judge on the 3 C's (vision)
 archbench judge \
     --task diagram \
     --predictions_path results/<run>/predictions.jsonl \
-    --dataset_path ground_truth_views/ \
     --judge_model gpt-4o
 ```
 
