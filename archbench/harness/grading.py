@@ -396,6 +396,13 @@ def compute_metrics(
             predicted_links=prediction,
             reference_links=reference,
         )
+    elif task == "diagram":
+        from archbench.tasks.diagram import grading as diagram_grading
+        # For diagram, prediction/reference are generated/ground-truth image paths
+        return diagram_grading.compute_diagram_metrics(
+            generated_image_path=str(prediction),
+            ground_truth_image_path=str(reference),
+        )
     elif task == "serverless":
         # TODO: Implement serverless metrics (CodeBLEU, test pass rates)
         logger.warning("Serverless metrics not yet implemented")

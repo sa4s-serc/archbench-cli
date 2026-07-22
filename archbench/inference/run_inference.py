@@ -271,11 +271,72 @@ class AnthropicProvider(ModelProvider):
         return text, metadata
 
 
-def get_provider(model_name: str) -> ModelProvider:
+class OllamaProvider(ModelProvider):
+    """Ollama local inference provider via OpenAI-compatible API."""
+
+    def __init__(self, model_name: str, host: str = "http://localhost:11434", **kwargs):
+        super().__init__(model_name, **kwargs)
+        import httpx
+        self.client = httpx.Client(timeout=120)
+        self.base_url = host.rstrip("/")
+        self.ollama_model = model_name[len("ollama/"):] if model_name.startswith("ollama/") else model_name
+
+    def generate(
+        self,
+        messages: List[Dict],
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        **kwargs,
+    ) -> Tuple[str, Dict]:
+        start_time = time.time()
+
+        print(f"[DEBUG] Calling Ollama with model: {self.ollama_model}")
+
+        data = {
+            "model": self.ollama_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+
+        try:
+            response = self.client.post(
+                f"{self.base_url}/v1/chat/completions",
+                json=data,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as e:
+            print(f"[DEBUG] Ollama ERROR: {type(e).__name__}: {e}")
+            raise
+
+        latency_ms = (time.time() - start_time) * 1000
+        print(f"[DEBUG] Ollama call successful, latency: {latency_ms:.0f}ms")
+
+        text = result["choices"][0]["message"]["content"]
+        usage = result.get("usage", {})
+        metadata = {
+            "model": result.get("model", self.ollama_model),
+            "usage": {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            },
+            "finish_reason": result["choices"][0].get("finish_reason"),
+            "latency_ms": latency_ms,
+        }
+
+        return text, metadata
+
+
+def get_provider(model_name: str, ollama_host: str = "http://localhost:11434") -> ModelProvider:
     """Get the appropriate provider for a model."""
     model_lower = model_name.lower()
 
-    if any(x in model_lower for x in ["gpt-4", "gpt-3.5", "davinci", "text-"]):
+    if model_lower.startswith("ollama/"):
+        return OllamaProvider(model_name, host=ollama_host)
+    elif any(x in model_lower for x in ["gpt-4", "gpt-3.5", "davinci", "text-"]):
         return OpenAIProvider(model_name)
     elif any(x in model_lower for x in ["claude"]):
         return AnthropicProvider(model_name)
@@ -294,9 +355,67 @@ def extract_response(task: str, response: str) -> Any:
     elif task == "traceability":
         from archbench.tasks.traceability import dataset as trace_dataset
         return trace_dataset.extract_prediction(response, task_type="sad-code")
+    elif task == "diagram":
+        from archbench.tasks.diagram import dataset as diagram_dataset
+        return diagram_dataset.extract_prediction(response)
     else:
         # TODO: Add other task extraction
         return response
+
+
+def render_plantuml(puml_code: str, instance_id: str, output_dir: Path) -> Optional[str]:
+    """
+    Render PlantUML code to a diagram image using the local ``plantuml`` binary.
+
+    Args:
+        puml_code: The PlantUML source to render
+        instance_id: Used to name the generated image and .puml file
+        output_dir: Directory to write the rendered image into
+
+    Returns:
+        Path to the generated image, or None if rendering failed (e.g. plantuml
+        not installed or the code did not compile).
+    """
+    import glob
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not puml_code.strip():
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    puml_dir = output_dir / "plantuml_code"
+    puml_dir.mkdir(parents=True, exist_ok=True)
+    puml_file = puml_dir / f"{instance_id}.puml"
+    puml_file.write_text(puml_code, encoding="utf-8")
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                ["plantuml", "-o", temp_dir, str(puml_file)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                logger.warning(f"PlantUML rendering failed for {instance_id}: {result.stderr.strip()}")
+                return None
+
+            generated_files = glob.glob(os.path.join(temp_dir, "*"))
+            if not generated_files:
+                logger.warning(f"PlantUML produced no output for {instance_id}")
+                return None
+
+            generated_file = generated_files[0]
+            ext = os.path.splitext(generated_file)[1]
+            output_path = output_dir / f"{instance_id}{ext}"
+            shutil.move(generated_file, str(output_path))
+            return str(output_path)
+    except FileNotFoundError:
+        logger.warning("plantuml binary not found; skipping render. Install PlantUML to enable image evaluation.")
+        return None
+    except Exception as e:
+        logger.warning(f"PlantUML rendering error for {instance_id}: {e}")
+        return None
 
 
 # =============================================================================
@@ -347,6 +466,16 @@ def run_inference_single(
                 sentences=instance["sentences"],
                 task_type="sad-code",
                 code_files=instance.get("available_targets", []),  # Provide actual code files!
+                prompt_style=prompt_style,
+            )
+        elif task == "diagram":
+            from archbench.tasks.diagram import prompts as diagram_prompts
+            from archbench.constants import KEY_SUMMARY, KEY_CONCERN, KEY_BEHAVIOR
+            messages = diagram_prompts.create_chat_messages(
+                summary=instance[KEY_SUMMARY],
+                concern=instance.get(KEY_CONCERN, "general"),
+                behavior=instance.get(KEY_BEHAVIOR, "static"),
+                repo_name=instance_id,
                 prompt_style=prompt_style,
             )
         else:
@@ -422,6 +551,8 @@ def run_inference(
     instance_ids: Optional[List[str]] = None,
     resume_from: Optional[str] = None,
     limit: Optional[int] = None,
+    ollama_host: str = "http://localhost:11434",
+    ground_truth_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run inference on an entire dataset.
@@ -438,6 +569,9 @@ def run_inference(
         instance_ids: Optional list of specific instance IDs to process
         resume_from: Path to existing predictions file to resume from
         limit: Optional limit on number of instances to process (for testing)
+        ground_truth_dir: Directory of ground truth diagram images (diagram task).
+            When given, each prediction records its ground truth image so that
+            evaluation and the judge can run without re-specifying the directory.
 
     Returns:
         Dictionary with summary statistics
@@ -458,6 +592,13 @@ def run_inference(
     elif task == "traceability":
         from archbench.tasks.traceability import dataset as trace_dataset
         dataset = trace_dataset.load_dataset(dataset_path=dataset_path, task_type="sad-code")
+    elif task == "diagram":
+        from archbench.tasks.diagram import dataset as diagram_dataset
+        dataset = diagram_dataset.load_dataset(
+            dataset_path=dataset_path,
+            instance_ids=instance_ids,
+            ground_truth_dir=ground_truth_dir,
+        )
     else:
         # TODO: Add other task loaders
         dataset = load_dataset(task, dataset_path=dataset_path, instance_ids=instance_ids)
@@ -481,7 +622,7 @@ def run_inference(
         logger.info(f"Loaded {len(existing_predictions)} existing predictions")
 
     # Initialize provider and trajectory logger
-    provider = get_provider(model)
+    provider = get_provider(model, ollama_host=ollama_host)
     traj_logger = TrajectoryLogger(output_dir, run_id)
 
     # Setup output
@@ -538,6 +679,20 @@ def run_inference(
                 "latency_ms": trajectory.latency_ms,
                 "token_usage": trajectory.token_usage,
             }
+
+            # For diagram, render the generated PlantUML to an image for evaluation
+            # and carry the ground truth reference through to the prediction record
+            if task == "diagram":
+                from archbench.constants import KEY_GENERATED_IMAGE, KEY_GROUND_TRUTH_IMAGE
+                if trajectory.success and trajectory.final_prediction:
+                    image_path = render_plantuml(
+                        puml_code=str(trajectory.final_prediction),
+                        instance_id=instance_id,
+                        output_dir=output_path / "generated_images",
+                    )
+                    prediction[KEY_GENERATED_IMAGE] = image_path or ""
+                prediction[KEY_GROUND_TRUTH_IMAGE] = instance.get(KEY_GROUND_TRUTH_IMAGE) or ""
+
             predictions.append(prediction)
 
             # Write immediately (for resume capability)
@@ -652,6 +807,12 @@ def main():
         default=None,
         help="Path to existing predictions file to resume from",
     )
+    parser.add_argument(
+        "--ollama_host",
+        type=str,
+        default="http://localhost:11434",
+        help="Ollama server URL (for ollama/ models)",
+    )
 
     args = parser.parse_args()
 
@@ -666,6 +827,7 @@ def main():
         run_id=args.run_id,
         instance_ids=args.instance_ids,
         resume_from=args.resume_from,
+        ollama_host=args.ollama_host,
     )
 
 

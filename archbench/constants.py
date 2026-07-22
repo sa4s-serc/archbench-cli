@@ -16,6 +16,7 @@ class TaskType(Enum):
     SERVERLESS = "serverless"        # Serverless Component Generation
     DYNAMIC = "dynamic"              # Dynamic IoT Service Generation
     TRACEABILITY = "traceability"    # Architecture Traceability Link Recovery
+    DIAGRAM = "diagram"              # Architecture View Generation
 
 
 TASKS = {
@@ -47,6 +48,13 @@ TASKS = {
         "primary_metric": "f1",
         "dataset": "sa4s-serc/archbench-traceability",
     },
+    TaskType.DIAGRAM.value: {
+        "name": "Architecture View Generation",
+        "description": "Generate architecture diagrams (PlantUML) from repository summaries",
+        "metrics": ["ssim", "psnr", "rmse", "sam", "sre", "uiq"],
+        "primary_metric": "ssim",
+        "dataset": "sa4s-serc/archbench-diagram",
+    },
 }
 
 # =============================================================================
@@ -68,6 +76,13 @@ KEY_TRACE_LINKS = "trace_links"
 KEY_DOCUMENTATION = "documentation"
 KEY_CODE_ARTIFACTS = "code_artifacts"
 
+# Diagram-specific keys
+KEY_SUMMARY = "summary"                     # Repository summary (inference input)
+KEY_CONCERN = "concern"                     # Architectural concern to capture
+KEY_BEHAVIOR = "behavior"                   # System behavior (static / dynamic)
+KEY_GROUND_TRUTH_IMAGE = "ground_truth_image"   # Path to reference diagram image
+KEY_GENERATED_IMAGE = "generated_image"     # Path to generated diagram image
+
 # =============================================================================
 # Instance Types
 # =============================================================================
@@ -86,6 +101,15 @@ class TraceabilityInstance(TypedDict):
     documentation: str
     code_artifacts: List[str]
     trace_links: List[dict]   # Ground truth links
+
+
+class DiagramInstance(TypedDict):
+    """Schema for architecture view generation task instances."""
+    instance_id: str
+    summary: str              # Repository summary (inference input)
+    concern: str              # Architectural concern to capture
+    behavior: str             # System behavior (static / dynamic)
+    ground_truth_image: str   # Path to reference diagram image (reference)
 
 
 class Prediction(TypedDict):
@@ -141,5 +165,8 @@ METRIC_THRESHOLDS = {
     },
     TaskType.TRACEABILITY.value: {
         "f1": 0.70,  # Considered good if F1 > 0.70
+    },
+    TaskType.DIAGRAM.value: {
+        "ssim": 0.70,  # Considered good if SSIM > 0.70
     },
 }

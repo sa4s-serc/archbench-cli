@@ -10,6 +10,7 @@ ArchBench provides standardized evaluation for LLMs on four software architectur
 |------|-------------|----------------|
 | **ADR** | Architecture Decision Record generation | BERTScore F1 |
 | **Traceability** | Architecture-to-code traceability link recovery | F1 Score |
+| **Diagram** | Architecture view generation (PlantUML diagrams) | SSIM |
 | **Serverless** | Serverless component generation | Test Pass Rate |
 | **Dynamic** | Dynamic IoT service generation | CodeBERTScore |
 
@@ -158,6 +159,58 @@ Each trajectory contains:
 | Precision | Correct links / Predicted links |
 | Recall | Correct links / Actual links |
 | F1 | Harmonic mean of P and R |
+
+### Diagram Task
+
+Generated diagrams are rendered from PlantUML and compared against ground truth
+diagram images. An optional LLM-as-a-judge scores the 3 C's (Clarity,
+Completeness, Consistency).
+
+| Metric | Description |
+|--------|-------------|
+| SSIM | Structural similarity index |
+| PSNR | Peak signal-to-noise ratio |
+| RMSE | Root mean squared error |
+| SAM | Spectral angle mapper |
+| SRE | Signal to reconstruction error |
+| UIQ | Universal image quality index |
+
+The diagram task needs image dependencies and the `plantuml` binary:
+
+```bash
+pip install -e ".[diagram]"   # opencv, scikit-image, image-similarity-measures
+```
+
+Generation, evaluation and the judge run as a single command. Diagrams are
+rendered from the generated PlantUML, compared against the ground truth images
+(matched by file stem), and judged on the 3 C's. The judge is optional and only
+runs when an API key for the judge model is available:
+
+```bash
+archbench inference \
+    --task diagram \
+    --model claude-3-5-sonnet-20240620 \
+    --dataset_path generated_summaries.jsonl \
+    --ground_truth_dir ground_truth_views/ \
+    --output_dir results/ \
+    --evaluate \
+    --judge
+```
+
+Each prediction records both the generated and the ground truth image, so the
+steps can also be run separately against an existing predictions file:
+
+```bash
+archbench evaluate \
+    --task diagram \
+    --predictions_path results/<run>/predictions.jsonl \
+    --output_dir results/
+
+archbench judge \
+    --task diagram \
+    --predictions_path results/<run>/predictions.jsonl \
+    --judge_model gpt-4o
+```
 
 ## Python API
 

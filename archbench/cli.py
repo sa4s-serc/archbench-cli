@@ -30,6 +30,7 @@ Examples:
 Available tasks:
   adr           - Architecture Decision Record generation
   traceability  - Architecture traceability link recovery
+  diagram       - Architecture view generation (PlantUML diagrams)
   serverless    - Serverless component generation
   dynamic       - Dynamic IoT service generation
 
@@ -75,6 +76,10 @@ For more information, visit: https://github.com/sa4s-serc/archbench
     infer_parser.add_argument("--resume_from", default=None, help="Resume from existing predictions")
     infer_parser.add_argument("--limit", type=int, default=None, help="Limit number of instances to process (for testing)")
     infer_parser.add_argument("--evaluate", action="store_true", help="Automatically run evaluation after inference")
+    infer_parser.add_argument("--judge", action="store_true", help="Automatically run LLM-as-a-judge after evaluation (skipped if no API key)")
+    infer_parser.add_argument("--judge_model", default=None, help="Model to use as judge (defaults to gpt-4o for diagram, gpt-4 otherwise)")
+    infer_parser.add_argument("--ground_truth_dir", default=None, help="Directory of ground truth diagram images (diagram task)")
+    infer_parser.add_argument("--ollama_host", default="http://localhost:11434", help="Ollama server URL (for ollama/ models)")
 
     # Validate command
     val_parser = subparsers.add_parser(
@@ -100,6 +105,7 @@ For more information, visit: https://github.com/sa4s-serc/archbench
     judge_parser.add_argument("--report_path", default=None, help="Path to evaluation report.json (auto-detected if not provided)")
     judge_parser.add_argument("--metrics_path", default=None, help="Path to per-instance metrics JSONL (auto-detected if not provided)")
     judge_parser.add_argument("--run_id", default=None, help="Unique run identifier")
+    judge_parser.add_argument("--ollama_host", default="http://localhost:11434", help="Ollama server URL (for ollama/ models)")
 
     # Download command (placeholder)
     dl_parser = subparsers.add_parser(
@@ -147,7 +153,13 @@ For more information, visit: https://github.com/sa4s-serc/archbench
             run_id=args.run_id,
             resume_from=args.resume_from,
             limit=args.limit,
+            ollama_host=args.ollama_host,
+            ground_truth_dir=args.ground_truth_dir,
         )
+
+        # For diagram, the ground truth is recorded on the predictions during
+        # inference, so evaluation and the judge run without a dataset path
+        eval_dataset_path = None if args.task == "diagram" else args.dataset_path
 
         # Run evaluation if requested
         if args.evaluate:
@@ -158,7 +170,7 @@ For more information, visit: https://github.com/sa4s-serc/archbench
             eval_report = run_evaluation(
                 task=args.task,
                 predictions_path=summary['predictions_file'],
-                dataset_path=args.dataset_path,
+                dataset_path=eval_dataset_path,
                 output_dir=args.output_dir,
                 compute_bertscore=(args.task == "adr"),  # Only for ADR
             )
@@ -175,6 +187,26 @@ For more information, visit: https://github.com/sa4s-serc/archbench
                     print(f"  {metric.replace('_mean', '')}: {value:.4f}")
             print(f"{'='*60}\n")
 
+        # Run LLM-as-a-judge if requested (optional: needs an API key)
+        if args.judge:
+            from archbench.harness.llm_judge import judge_api_key_available, run_llm_judge
+            judge_model = args.judge_model or ("gpt-4o" if args.task == "diagram" else "gpt-4")
+
+            if not judge_api_key_available(judge_model):
+                print(f"Skipping LLM-as-a-judge: no API key available for {judge_model}\n")
+            else:
+                print("\n" + "="*60)
+                print("Running LLM-as-a-judge...")
+                print("="*60 + "\n")
+                run_llm_judge(
+                    task=args.task,
+                    predictions_path=summary['predictions_file'],
+                    dataset_path=eval_dataset_path,
+                    judge_model=judge_model,
+                    output_dir=args.output_dir,
+                    ollama_host=args.ollama_host,
+                )
+
     elif args.command == "judge":
         from archbench.harness.llm_judge import run_llm_judge
         report = run_llm_judge(
@@ -187,6 +219,7 @@ For more information, visit: https://github.com/sa4s-serc/archbench
             report_path=args.report_path,
             instance_metrics_path=args.metrics_path,
             run_id=args.run_id,
+            ollama_host=args.ollama_host,
         )
 
     elif args.command == "validate":
